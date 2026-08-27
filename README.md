@@ -95,6 +95,7 @@ reads anything from the host environment.
 
 ## Ideas to improve next
 
+- **AI panel debate + final inference** — 2–3 AI personas argue your topic with citations, then a synthesizer gives a verdict. Full design: `docs/DEBATE-ENGINE.md`
 - Dense + hybrid retrieval (embeddings) and cross-encoder reranking
 - Reference versioning (chunk hashes) so answers stay valid after re-indexing
 - Upload scanned PDFs (OCR step) and EPUB/MOBI
