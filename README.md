@@ -6,6 +6,10 @@ Inspired by the [book-to-skill](https://github.com/virgiliojr94/book-to-skill) a
 
 ![stack](https://img.shields.io/badge/stack-Express%2BReact-blue)
 
+## Live demo
+
+Run it now — no install needed: https://3001-d9c9b3c641cbd15d.monkeycode-ai.live
+
 ## Features
 
 - **Document → Skill.** Upload a PDF, DOCX, Markdown, HTML or TXT. The server extracts text, detects chapters/sections, and generates a structured skill:
