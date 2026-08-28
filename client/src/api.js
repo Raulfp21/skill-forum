@@ -34,6 +34,7 @@ export const api = {
 
   sendChat: (payload) => request('/chat', { method: 'POST', body: JSON.stringify(payload) }),
   getChatHistory: (skillId) => request(`/chat/${skillId}`),
+  compareChat: (payload) => request('/chat/compare', { method: 'POST', body: JSON.stringify(payload) }),
 
   searchJournals: (q, source) => request(`/search?q=${encodeURIComponent(q)}&source=${source}`),
   searchSources: () => request('/search/sources'),
@@ -42,4 +43,5 @@ export const api = {
   getTopic: (id) => request(`/forum/${id}`),
   createTopic: (payload) => request('/forum', { method: 'POST', body: JSON.stringify(payload) }),
   replyTopic: (id, payload) => request(`/forum/${id}/posts`, { method: 'POST', body: JSON.stringify(payload) }),
+  createDebate: (payload) => request('/forum/debate', { method: 'POST', body: JSON.stringify(payload) }),
 };

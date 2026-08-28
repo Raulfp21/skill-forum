@@ -4,6 +4,7 @@ import Dashboard from './pages/Dashboard.jsx';
 import SkillDetail from './pages/SkillDetail.jsx';
 import Forum from './pages/Forum.jsx';
 import Search from './pages/Search.jsx';
+import Compare from './pages/Compare.jsx';
 
 function parseHash() {
   const raw = window.location.hash.replace(/^#/, '') || '/';
@@ -44,6 +45,7 @@ export default function App() {
           <nav className="nav">
             <a className={isActive('/') ? 'active' : ''} onClick={() => nav('/')}>Skills</a>
             <a className={isActive('/forum') ? 'active' : ''} onClick={() => nav('/forum')}>Forum</a>
+            <a className={isActive('/compare') ? 'active' : ''} onClick={() => nav('/compare')}>Compare</a>
             <a className={isActive('/search') ? 'active' : ''} onClick={() => nav('/search')}>Journals</a>
           </nav>
           <div className="topbar-right">
@@ -56,6 +58,7 @@ export default function App() {
         {route.path === '/' && <Dashboard nav={nav} />}
         {route.path.startsWith('/skill') && route.params[0] && <SkillDetail id={route.params[0]} nav={nav} />}
         {route.path === '/forum' && <Forum nav={nav} />}
+        {route.path === '/compare' && <Compare />}
         {route.path === '/search' && <Search />}
       </main>
     </div>

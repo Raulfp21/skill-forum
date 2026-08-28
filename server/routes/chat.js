@@ -1,7 +1,7 @@
 import express from 'express';
 import { store } from '../lib/store.js';
 import { buildIndex, search } from '../lib/bm25.js';
-import { generateAnswer, isRealLLM } from '../lib/mockllm.js';
+import { generateAnswer, generateCompare, isRealLLM } from '../lib/mockllm.js';
 import { getSkillById, loadChunks } from '../lib/pipeline.js';
 
 const router = express.Router();
@@ -15,6 +15,29 @@ function saveHistory(h) {
 
 router.get('/config', (req, res) => {
   res.json({ llm: isRealLLM() ? 'configured' : 'mock' });
+});
+
+router.post('/compare', async (req, res) => {
+  const { skillIds, message, mode } = req.body || {};
+  const ids = Array.isArray(skillIds) ? skillIds : [];
+  if (!message?.trim() || ids.length < 2) {
+    return res.status(400).json({ error: 'message and at least 2 skillIds are required' });
+  }
+
+  const skillDataList = [];
+  for (const id of ids) {
+    const skill = getSkillById(id);
+    if (!skill) continue;
+    const index = buildIndex(loadChunks(id));
+    const results = search(index, message, 4);
+    skillDataList.push({ skill, results });
+  }
+  if (skillDataList.length < 2) {
+    return res.status(400).json({ error: 'At least 2 valid skills are required' });
+  }
+
+  const answer = await generateCompare(skillDataList, message, mode);
+  res.json({ ...answer, query: message });
 });
 
 router.post('/', async (req, res) => {

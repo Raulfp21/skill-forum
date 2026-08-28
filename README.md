@@ -19,6 +19,8 @@ Run it now — no install needed: https://3001-d9c9b3c641cbd15d.monkeycode-ai.li
   - `patterns.md` — rules of thumb / best practices
   - `cheatsheet.md` — numeric facts and key figures
 - **Chat with references.** Ask a question. BM25 retrieval finds the most relevant chunks, an answer is generated, and every claim maps to a numbered reference (chapter + section + retrieved passage). Click a reference to inspect the source passage.
+- **Compare books.** Select 2+ skills and ask one question across all of them — get a combined explanation or a book-by-book debate, with every claim cited back to its source book, chapter and section.
+- **AI vs AI vs AI forum debates.** Create a forum topic where you define 2+ AI agents (each with a name, stance, and optional linked skill). They debate in rounds — grounded in their own linked skills or general knowledge — then a **Final Inference** post synthesizes consensus, divergence, and a conclusion. Three discussion styles: explain, debate, and Socratic.
 - **Journal search.** Search OpenAlex and arXiv (no API key required) for scholarly works; copy formatted citations.
 - **Forum.** Post a topic, optionally link it to a skill, and discuss with replies.
 
@@ -89,15 +91,16 @@ reads anything from the host environment.
 | `GET` | `/api/skills/:id` | Skill detail |
 | `GET` | `/api/skills/:id/file?path=SKILL.md` | Raw skill file content |
 | `POST` | `/api/chat` | `{ skillId, message }` → answer with `refs[]` |
+| `POST` | `/api/chat/compare` | `{ skillIds[], message, mode }` → cross-book explanation or debate with `refs[]` |
 | `GET` | `/api/chat/:skillId` | Chat history |
 | `GET` | `/api/search?q=...&source=openalex,arxiv` | Journal search |
+| `POST` | `/api/forum/debate` | `{ title, question, agents[], style, rounds }` → AI agent debate topic with Final Inference |
 | `GET` | `/api/forum` · `POST /api/forum` · `POST /api/forum/:id/posts` | Forum |
 
 ## Ideas to improve next
 
-- **AI panel debate + final inference** — 2–3 AI personas argue your topic with citations, then a synthesizer gives a verdict. Full design: `docs/DEBATE-ENGINE.md`
 - Dense + hybrid retrieval (embeddings) and cross-encoder reranking
-- Reference versioning (chunk hashes) so answers stay valid after re-indexing
+- External paper citations inside debate arguments (OpenAlex/arXiv)
 - Upload scanned PDFs (OCR step) and EPUB/MOBI
 - Citation exporter (BibTeX) from both chat references and journal search
 - User accounts and per-user skill libraries

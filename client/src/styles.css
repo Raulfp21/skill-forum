@@ -211,3 +211,15 @@ input:focus, textarea:focus, select:focus {
 @keyframes spin { to { transform: rotate(360deg); } }
 
 .tag { display: inline-block; font-size: 12px; background: #f3f4f6; border-radius: 6px; padding: 1px 7px; margin: 0 4px 4px 0; color: var(--muted); }
+
+.confbar { display: flex; align-items: center; gap: 8px; }
+.confbar-fill { height: 8px; background: linear-gradient(90deg, #4f46e5, #8b5cf6); border-radius: 99px; transition: width 0.4s; }
+.confbar span { font-size: 12px; color: var(--muted); }
+
+.label { display: inline-block; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; color: var(--muted); background: #f3f4f6; padding: 1px 6px; border-radius: 4px; }
+.post-agent { border-left: 3px solid var(--accent); background: #fbfbff; }
+.post-synthesis { border: 1px solid var(--accent); background: var(--accent-soft); }
+.post-synthesis .meta { color: var(--accent); font-weight: 600; }
+
+.round-group { margin-bottom: 8px; }
+.round-header { display: flex; align-items: center; padding: 8px 4px; border-bottom: 1px dashed var(--border); margin-bottom: 8px; }
