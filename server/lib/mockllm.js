@@ -188,13 +188,139 @@ export async function generateAgentTurn(agent, query, results, opts = {}) {
   return { text: mockAgentTurn(agent, query, results, opts), refs: buildAgentReferences(results), mode: 'mock' };
 }
 
+// ---------------------------------------------------------------------------
+// Conversational beats: a debate is now a sequence of SHORT reactive turns
+// (point / pushback / clarify / concede / example / answer / close /
+// moderator) instead of one long monologue per agent per round. Each beat
+// reacts to the immediately preceding beat and cites at most 1-2 fresh
+// passages. Mock mode produces short templated beats too, so it also reads
+// like a conversation.
+// ---------------------------------------------------------------------------
+
+const BEAT_STYLE_LINE = {
+  explain: 'This is a collaborative explanatory discussion — build on each other and reach for concrete examples.',
+  debate: 'This is a sharp debate — challenge weak claims by name and defend your own.',
+  socratic: 'This is a Socratic dialogue — expose gaps with pointed questions, or directly answer a question just asked.',
+};
+
+const BEAT_TYPE_INSTRUCTIONS = {
+  point: 'Make a short claim about the question, grounded in your sources.',
+  pushback: 'Directly push back on the most recent message — say why it is wrong or incomplete, then give your own view.',
+  clarify: 'Ask ONE pointed clarifying question about the most recent message, or restate it to confirm your understanding.',
+  concede: 'Concede the valid part of the most recent point, then add one refinement or edge case.',
+  example: 'Ground the discussion with one concrete example or analogy from your sources.',
+  answer: 'Directly answer the question that was just asked of you, citing a passage.',
+  close: 'In one or two sentences, give your final takeaway for this discussion.',
+  moderator: 'As a neutral moderator, ask ONE sharp question to one specific agent to push the discussion forward.',
+};
+
+const BEAT_MENUS = {
+  explain: ['point', 'example', 'clarify', 'point', 'concede'],
+  debate: ['point', 'pushback', 'concede', 'example', 'pushback'],
+  socratic: ['clarify', 'answer', 'point', 'clarify', 'answer'],
+};
+
+function lowerFirst(text) {
+  return text ? text.charAt(0).toLowerCase() + text.slice(1) : '';
+}
+
+function mockBeat(agent, question, lastBeat, beatType, results, { style = 'explain', target } = {}) {
+  const passage = (i) => (results[i] ? firstSentence(results[i].chunk.text) : null);
+  const cite = (i) => (results[i] ? ` \`[${i + 1}]\`` : '');
+  const last = lastBeat ? lastBeat.body : null;
+
+  switch (beatType) {
+    case 'point':
+      return passage(0)
+        ? `I'd argue that ${lowerFirst(passage(0))}${cite(0)}`
+        : `I'd argue for ${agent.stance || 'my position'} here, though I can't cite a source for it.`;
+    case 'pushback':
+      return passage(0)
+        ? `I'd push back on that — ${lowerFirst(passage(0))}${cite(0)}`
+        : `I'd push back there: that framing is too broad for this question.`;
+    case 'clarify':
+      return `Could you clarify what you mean? Are you claiming that applies always, or only in the typical case?`;
+    case 'concede':
+      return last
+        ? `You're right that ${lowerFirst(firstSentence(last))}, and I'd only add: ${passage(0) ? lowerFirst(passage(0)) : 'consider the edge cases.'}${cite(0)}`
+        : `Fair point${passage(0) ? ` — ${lowerFirst(passage(0))}${cite(0)}` : '.'}`;
+    case 'example':
+      return passage(0)
+        ? `Concretely, ${lowerFirst(passage(0))}${cite(0)}`
+        : `Think of the everyday case: that is exactly where the difference shows up.`;
+    case 'answer':
+      return passage(0)
+        ? `In short: ${lowerFirst(passage(0))}${cite(0)}`
+        : `In short, the answer depends on what you mean by the question — could you pin down the scope?`;
+    case 'close':
+      return passage(0)
+        ? `Net: ${lowerFirst(passage(0))}${cite(0)}`
+        : `Net: my position stands — ${agent.stance || "the evidence I've seen favors it."}`;
+    case 'moderator':
+      return target
+        ? `@${target} — could you ground that claim in your source and tell us where you genuinely agree or disagree with the others?`
+        : 'Could one of you ground that claim in a source passage so we can compare positions directly?';
+    default:
+      return passage(0) ? `${lowerFirst(passage(0))}${cite(0)}` : 'My position stands.';
+  }
+}
+
+async function realBeat(agent, question, lastBeat, beatType, results, { style = 'explain', target } = {}) {
+  const persona = agent.stance
+    ? `You are "${agent.name}", who takes this stance: ${agent.stance}.`
+    : `You are "${agent.name}".`;
+  const roleLine = beatType === 'moderator'
+    ? 'You are the neutral moderator of the discussion.'
+    : `You are in a live conversation between AI agents about: "${question}".`;
+
+  const reactLine = beatType === 'moderator'
+    ? (target ? `Ask your question to ${target}.` : 'Ask a neutral, sharp question.')
+    : (lastBeat
+      ? `The most recent message was by ${lastBeat.author}${lastBeat.beatType ? ` (a "${lastBeat.beatType}")` : ''}: "${lastBeat.body}"`
+      : 'You are opening the conversation.');
+
+  const styleLine = BEAT_STYLE_LINE[style] || BEAT_STYLE_LINE.explain;
+  const typeLine = BEAT_TYPE_INSTRUCTIONS[beatType] || BEAT_TYPE_INSTRUCTIONS.point;
+
+  const grounding = results.length
+    ? `You may cite up to these NEW source passages, using bracketed numbers like [1][2] matching them exactly:\n\n## Sources\n${results.map((r, i) => `[${i + 1}] ${r.chunk.chapterTitle} / ${r.chunk.sectionTitle}\n${r.chunk.text}`).join('\n\n---\n\n')}`
+    : (agent.skillId
+      ? 'No unused source passages remain from your linked source — briefly say your source is exhausted and reason one short step further.'
+      : 'No source is linked for you — reason from general knowledge and do not invent citations.');
+
+  const prompt = `${persona}\n\n${roleLine}\n\n${reactLine}\n\n${styleLine}\n\nYour move is a "${beatType}" beat. ${typeLine}\n\n${grounding}\n\nRules: 1-3 sentences, at most 60 words. Talk directly to the previous speaker. No headings, no self-introduction, no boilerplate. Keep it conversational.\n\n## Your beat`;
+
+  const res = await fetch(`${LLM_BASE_URL.replace(/\/$/, '')}/chat/completions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${LLM_KEY}` },
+    body: JSON.stringify({ model: LLM_MODEL, messages: [{ role: 'user', content: prompt }], temperature: 0.6 }),
+  });
+  if (!res.ok) throw new Error(`LLM request failed (${res.status})`);
+  const data = await res.json();
+  return data.choices?.[0]?.message?.content || '';
+}
+
+export async function generateBeat(agent, question, lastBeat, beatType, results, opts = {}) {
+  if (isRealLLM() && (results.length || !agent.skillId)) {
+    try {
+      const text = await realBeat(agent, question, lastBeat, beatType, results, opts);
+      return { text, refs: buildAgentReferences(results), mode: 'llm' };
+    } catch (err) {
+      return { text: mockBeat(agent, question, lastBeat, beatType, results, opts), refs: buildAgentReferences(results), mode: 'mock', error: err.message };
+    }
+  }
+  return { text: mockBeat(agent, question, lastBeat, beatType, results, opts), refs: buildAgentReferences(results), mode: 'mock' };
+}
+
+export { BEAT_MENUS };
+
 function mockSynthesis(query, agentPosts) {
-  const list = agentPosts.map((p) => `- **${p.author}**${p.stance ? ` (${p.stance})` : ''} (round ${p.round}): ${firstSentence(p.body)}`).join('\n');
+  const list = agentPosts.map((p) => `- **${p.author}**${p.stance ? ` (${p.stance})` : ''}${p.beatType ? ` (${p.beatType})` : ''}: ${firstSentence(p.body)}`).join('\n');
   return `## Final Inference\n\nOn "${query}", the discussion so far:\n\n${list}\n\nEnable a real LLM (set \`USER_LLM_API_KEY\`) for a fluent synthesis that separates genuine agreement from genuine disagreement and gives a reasoned conclusion.`;
 }
 
 async function realSynthesis(query, agentPosts) {
-  const context = agentPosts.map((p, i) => `### Turn ${i + 1} — ${p.author}${p.stance ? ` (${p.stance})` : ''} (round ${p.round})\n${p.body}`).join('\n\n');
+  const context = agentPosts.map((p, i) => `### Turn ${i + 1} — ${p.author}${p.stance ? ` (${p.stance})` : ''}${p.beatType ? ` [${p.beatType}]` : ''}${p.replyTo ? ` (replying to ${p.replyTo})` : ''}\n${p.body}`).join('\n\n');
   const prompt = `You are moderating a multi-round discussion between the agents below on the question given. Write a "Final Inference" with three short sections:\n\n1. **Consensus** — where the agents genuinely agree, or where a point was raised and never actually rebutted (the safe, reliable answer).\n2. **Divergence** — where they genuinely still differ after the full discussion, and why (different sources, criteria, or framing — not just wording).\n3. **Conclusion** — a short, reasoned takeaway a reader should walk away with, including the best analogy or example used in the discussion if one helps.\n\nDo not invent facts not present in the agents' own turns. Reference agents by name when noting agreement or disagreement.\n\n## Question\n${query}\n\n## Full discussion (in order)\n${context}\n\n## Final Inference`;
 
   const res = await fetch(`${LLM_BASE_URL.replace(/\/$/, '')}/chat/completions`, {

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { marked } from 'marked';
 import { api } from '../api.js';
 
@@ -8,6 +8,24 @@ function Markdown({ text }) {
 }
 
 const emptyAgent = () => ({ name: '', stance: '', skillId: '' });
+
+const AGENT_COLORS = ['#6b48ff', '#e8590c', '#0ca678', '#e03131', '#1098ad', '#f08c00'];
+const BEAT_LABELS = {
+  point: 'point',
+  pushback: 'pushback',
+  clarify: 'clarify',
+  concede: 'concede',
+  example: 'example',
+  answer: 'answer',
+  close: 'close',
+  moderator: 'moderator',
+};
+
+function agentColor(name) {
+  let h = 0;
+  for (const c of name) h = (h * 31 + c.charCodeAt(0)) % AGENT_COLORS.length;
+  return AGENT_COLORS[h];
+}
 
 export default function Forum({ nav }) {
   const [topics, setTopics] = useState(null);
@@ -21,13 +39,21 @@ export default function Forum({ nav }) {
     author: 'You',
     style: 'explain',
     rounds: 2,
+    moderator: false,
     agents: [emptyAgent(), emptyAgent()],
   });
   const [reply, setReply] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-  const [expandedRounds, setExpandedRounds] = useState(new Set());
-  const toggleRound = (r) => setExpandedRounds((s) => { const n = new Set(s); n.has(r) ? n.delete(r) : n.add(r); return n; });
+  const esRef = useRef(null);
+
+  const stopStream = () => {
+    if (esRef.current) {
+      esRef.current.close();
+      esRef.current = null;
+    }
+  };
+  useEffect(() => () => stopStream(), []);
 
   const load = () => api.listTopics().then(setTopics).catch((e) => setError(e.message));
   useEffect(() => { load(); api.listSkills().then(setSkills).catch(() => {}); }, []);
@@ -54,30 +80,61 @@ export default function Forum({ nav }) {
     setBusy(true);
     setError('');
     try {
-      const t = await api.createDebate({
+      const { topicId } = await api.createDebate({
         title: debateForm.title.trim(),
         question: debateForm.question.trim(),
         author: debateForm.author,
         style: debateForm.style,
         rounds: debateForm.rounds,
+        moderator: debateForm.moderator,
         agents: validAgents.map((a) => ({ name: a.name.trim(), stance: a.stance.trim(), skillId: a.skillId || null })),
       });
-      setDebateForm({ title: '', question: '', author: 'You', style: 'explain', rounds: 2, agents: [emptyAgent(), emptyAgent()] });
+      setDebateForm({ title: '', question: '', author: 'You', style: 'explain', rounds: 2, moderator: false, agents: [emptyAgent(), emptyAgent()] });
       load();
-      open(t.id);
+      const t = await api.getTopic(topicId);
+      setSelected(t);
+      attachStream(topicId);
     } catch (e) {
       setError(e.message);
-    } finally {
       setBusy(false);
     }
+  };
+
+  const attachStream = (id) => {
+    stopStream();
+    if (!id) return;
+    const es = api.streamDebate(id);
+    esRef.current = es;
+    const appendPost = (post) => {
+      setSelected((s) => {
+        if (!s || s.id !== id) return s;
+        if (s.posts.some((p) => p.id === post.id)) return s;
+        return { ...s, posts: [...s.posts, post], debate: { ...s.debate, status: 'running' } };
+      });
+    };
+    es.addEventListener('beat', (e) => appendPost(JSON.parse(e.data).post));
+    es.addEventListener('synthesis', (e) => appendPost(JSON.parse(e.data).post));
+    es.addEventListener('error', () => {
+      stopStream();
+      setSelected((s) => (s && s.id === id ? { ...s, debate: { ...s.debate, status: 'done' } } : s));
+      setBusy(false);
+    });
+    es.addEventListener('done', () => {
+      stopStream();
+      setSelected((s) => (s && s.id === id ? { ...s, debate: { ...s.debate, status: 'done' } } : s));
+      setBusy(false);
+    });
   };
 
   const open = async (id) => {
     const t = await api.getTopic(id);
     setSelected(t);
-    const rounds = [...new Set(t.posts.filter((p) => p.role === 'agent').map((p) => p.round))];
-    const lastRound = rounds.length ? Math.max(...rounds) : null;
-    setExpandedRounds(lastRound ? new Set([lastRound]) : new Set());
+    if (t.debate?.status === 'running') {
+      setBusy(true);
+      attachStream(id);
+    } else {
+      setBusy(false);
+    }
   };
 
   const postReply = async () => {
@@ -100,78 +157,70 @@ export default function Forum({ nav }) {
         <p className="page-sub">
           By {selected.author} · {new Date(selected.createdAt).toLocaleString()}
           {isDebate && <span className="badge" style={{ marginLeft: 8 }}>AI debate · {selected.debate.agents.length} agents</span>}
+          {isDebate && selected.debate.status === 'running' && <span className="badge gray" style={{ marginLeft: 8 }}>running…</span>}
         </p>
         {selected.skillId && (
           <p><button className="primary" onClick={() => nav(`/skill/${selected.skillId}`)}>Open linked skill: {skillName(selected.skillId)}</button></p>
         )}
 
         <div className="card">
-          {(() => {
-            const rounds = [...new Set(selected.posts.filter((p) => p.role === 'agent').map((p) => p.round))].sort((a, b) => a - b);
-            const lastRound = rounds.length ? Math.max(...rounds) : null;
-            const rendered = [];
-            let i = 0;
-            while (i < selected.posts.length) {
-              const p = selected.posts[i];
-              if (p.role === 'agent') {
-                const r = p.round;
-                const group = [];
-                while (i < selected.posts.length && selected.posts[i].role === 'agent' && selected.posts[i].round === r) {
-                  group.push(selected.posts[i]);
-                  i++;
+          {isDebate ? (
+            <div className="debate-thread">
+              {selected.posts.map((p) => {
+                if (p.role === 'question') {
+                  return (
+                    <div key={p.id} className="post post-question">
+                      <div className="meta"><strong>Question</strong></div>
+                      <div className="body">{p.body}</div>
+                    </div>
+                  );
                 }
-                const isExpanded = expandedRounds.has(r) || r === lastRound || rounds.length <= 1;
-                rendered.push(
-                  <div key={`round-${r}`} className="round-group">
-                    {rounds.length > 1 && (
-                      <div className="round-header" onClick={() => toggleRound(r)} style={{ cursor: 'pointer' }}>
-                        <span className="badge gray">round {r} of {rounds.length}</span>
-                        <span className="small muted" style={{ marginLeft: 8 }}>
-                          {isExpanded ? 'Hide ▲' : `Show ${group.length} turn${group.length > 1 ? 's' : ''} ▼`}
-                        </span>
+                if (p.role === 'synthesis') {
+                  return (
+                    <div key={p.id} className="post post-synthesis">
+                      <div className="meta"><strong>Final Inference</strong> · {new Date(p.createdAt).toLocaleString()} {p.mode === 'mock' && <span className="label">mock</span>}</div>
+                      <Markdown text={p.body} />
+                    </div>
+                  );
+                }
+                if (p.role === 'agent' || p.role === 'moderator') {
+                  const color = agentColor(p.author);
+                  return (
+                    <div key={p.id} className="post post-agent beat" style={{ borderLeftColor: color }}>
+                      <div className="meta">
+                        <span className="avatar" style={{ background: color }}>{p.author.charAt(0)}</span>
+                        <strong>{p.author}</strong>
+                        {p.beatType && <span className="badge beat-tag" style={{ color, borderColor: color }}>{BEAT_LABELS[p.beatType] || p.beatType}</span>}
+                        {p.stance && <span className="badge gray" style={{ marginLeft: 6 }}>{p.stance}</span>}
+                        {p.skillName && <span className="badge" style={{ marginLeft: 6 }}>{p.skillName}</span>}
+                        {p.mode === 'mock' && <span className="label" style={{ marginLeft: 6 }}>mock</span>}
+                        {p.replyTo && <span className="small muted reply-to">↳ in reply to {p.replyTo}</span>}
                       </div>
-                    )}
-                    {isExpanded && group.map((post) => (
-                      <div key={post.id} className="post post-agent">
-                        <div className="meta">
-                          <strong>🤖 {post.author}</strong>
-                          {post.stance && <span className="badge gray" style={{ marginLeft: 6 }}>{post.stance}</span>}
-                          {post.skillName && <span className="badge" style={{ marginLeft: 6 }}>{post.skillName}</span>}
-                          {post.mode === 'mock' && <span className="label" style={{ marginLeft: 6 }}>mock</span>}
-                          <span> · {new Date(post.createdAt).toLocaleString()}</span>
+                      <Markdown text={p.body} />
+                      {p.refs && p.refs.length > 0 && (
+                        <div className="small muted mt">
+                          Refs: {p.refs.map((rf) => `[${rf.refId}] ${rf.chapter} / ${rf.section}`).join('  ·  ')}
                         </div>
-                        <Markdown text={post.body} />
-                        {post.refs && post.refs.length > 0 && (
-                          <div className="small muted mt">
-                            Refs: {post.refs.map((rf) => `[${rf.refId}] ${rf.chapter} / ${rf.section}`).join('  ·  ')}
-                          </div>
-                        )}
-                      </div>
-                    ))}
+                      )}
+                    </div>
+                  );
+                }
+                return (
+                  <div key={p.id} className="post">
+                    <div className="meta"><strong>{p.author}</strong> · {new Date(p.createdAt).toLocaleString()}</div>
+                    <div className="body">{p.body}</div>
                   </div>
                 );
-                continue;
-              }
-              if (p.role === 'synthesis') {
-                rendered.push(
-                  <div key={p.id} className="post post-synthesis">
-                    <div className="meta"><strong>🧭 {p.author}</strong> · {new Date(p.createdAt).toLocaleString()} {p.mode === 'mock' && <span className="label">mock</span>}</div>
-                    <Markdown text={p.body} />
-                  </div>
-                );
-                i++;
-                continue;
-              }
-              rendered.push(
-                <div key={p.id} className="post">
-                  <div className="meta"><strong>{p.author}</strong> · {new Date(p.createdAt).toLocaleString()}</div>
-                  <div className="body">{p.body}</div>
-                </div>
-              );
-              i++;
-            }
-            return rendered;
-          })()}
+              })}
+            </div>
+          ) : (
+            selected.posts.map((p) => (
+              <div key={p.id} className="post">
+                <div className="meta"><strong>{p.author}</strong> · {new Date(p.createdAt).toLocaleString()}</div>
+                <div className="body">{p.body}</div>
+              </div>
+            ))
+          )}
         </div>
 
         <div className="card mt">
@@ -274,17 +323,26 @@ export default function Forum({ nav }) {
               : 'Agents explain the topic clearly, reaching for analogies and concrete examples, building on each other each round.'}
           </p>
 
-          <h4 className="mt">Rounds</h4>
+          <h4 className="mt">Exchanges</h4>
           <div className="tabs">
             {[1, 2, 3].map((n) => (
               <button key={n} className={debateForm.rounds === n ? 'active' : ''} onClick={() => setDebateForm({ ...debateForm, rounds: n })}>
-                {n} round{n > 1 ? 's' : ''}
+                {n} exchange{n > 1 ? 's' : ''}
               </button>
             ))}
           </div>
           <p className="small muted">
-            More than 1 round means each agent sees and responds to what the others said. Later rounds also pull fresh, unused source passages instead of repeating the same ones.
+            The agents talk in short, reactive beats (point, pushback, clarify, concede, example…). Each exchange is a quick back-and-forth; more exchanges make the conversation longer.
           </p>
+
+          <label className="row mt" style={{ alignItems: 'center', gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={debateForm.moderator}
+              onChange={(e) => setDebateForm({ ...debateForm, moderator: e.target.checked })}
+            />
+            <span>Add a neutral moderator who asks questions between exchanges</span>
+          </label>
 
           <div className="row mt" style={{ marginBottom: 8 }}>
             <input placeholder="Your name (optional)" value={debateForm.author} onChange={(e) => setDebateForm({ ...debateForm, author: e.target.value })} />
@@ -292,9 +350,9 @@ export default function Forum({ nav }) {
 
           <div className="mt">
             <button className="primary" onClick={runDebate} disabled={!canRunDebate}>
-              {busy ? 'Running debate...' : 'Run debate'}
+              {busy ? 'Conversation running...' : 'Start conversation'}
             </button>
-            {busy && <span className="small muted" style={{ marginLeft: 10 }}><span className="spin" /> Running {debateForm.rounds} round{debateForm.rounds > 1 ? 's' : ''}, then synthesizing...</span>}
+            {busy && <span className="small muted" style={{ marginLeft: 10 }}><span className="spin" /> Watching the conversation unfold live...</span>}
           </div>
         </div>
       )}
@@ -314,7 +372,7 @@ export default function Forum({ nav }) {
                 <h3>{t.title}</h3>
                 <div className="meta">{t.author} · {new Date(t.createdAt).toLocaleDateString()} · {t.posts} posts</div>
                 {t.skillId && <span className="badge">skill: {skillName(t.skillId)}</span>}
-                {t.debate && <span className="badge">🤖 AI debate · {t.debate.agents.length} agents</span>}
+                {t.debate && <span className="badge">AI debate · {t.debate.agents.length} agents</span>}
               </div>
             ))}
           </div>

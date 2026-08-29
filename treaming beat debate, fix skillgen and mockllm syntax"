@@ -1,0 +1,5 @@
+[33m46cf9e6[m[33m ([m[1;36mHEAD -> [m[1;32mmaster[m[33m, [m[1;31morigin/master[m[33m)[m docs: remove obsolete standalone panel-debate design doc Co-authored-by: monkeycode-ai <monkeycode-ai@chaitin.com>
+[33m31c591b[m feat: compare-across-books page, AI agent forum debates, final inference
+[33m90677d2[m docs: AI panel debate design doc + OpenRouter->Omniroute env example Co-authored-by: monkeycode-ai <monkeycode-ai@chaitin.com>
+[33m33a114f[m docs: add live demo link to README Co-authored-by: monkeycode-ai <monkeycode-ai@chaitin.com> Co-authored-by: monkeycode-ai <monkeycode-ai@chaitin.com> Co-authored-by: monkeycode-ai <monkeycode-ai@chaitin.com>
+[33m2ada676[m feat: skill-forum — documents to skills, chat with references, journal search, forum Co-authored-by: monkeycode-ai <monkeycode-ai@chaitin.com>

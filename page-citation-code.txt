@@ -1,3 +1,214 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+export const SUPPORTED = {
+  '.txt': 'text/plain',
+  '.md': 'text/markdown',
+  '.html': 'text/html',
+  '.htm': 'text/html',
+  '.pdf': 'application/pdf',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+};
+
+export function detectExt(name) {
+  const ext = path.extname(name || '').toLowerCase();
+  return SUPPORTED[ext] ? ext : null;
+}
+
+async function extractPdf(buffer) {
+  const pdfParse = (await import('pdf-parse')).default;
+  const data = await pdfParse(buffer);
+  return data.text || '';
+}
+
+async function extractPdfWithPages(buffer) {
+  const pdfParse = (await import('pdf-parse')).default;
+  const pages = [];
+
+  await pdfParse(buffer, {
+    pagerender: async (pageData) => {
+      const content = await pageData.getTextContent();
+      const text = content.items.map((item) => item.str || '').join(' ');
+
+      pages.push({
+        page: pageData.pageIndex + 1,
+        text: text.trim(),
+      });
+
+      return text;
+    },
+  });
+
+  pages.sort((a, b) => a.page - b.page);
+  return pages;
+}
+
+async function extractDocx(buffer) {
+  const mammoth = (await import('mammoth'));
+  const { value } = await mammoth.extractRawText({ buffer });
+  return value || '';
+}
+
+function extractHtml(text) {
+  const without = text
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ');
+  return without.replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
+}
+
+export async function extractTextWithPages(file) {
+  const ext = detectExt(file.originalname);
+
+  if (!ext) {
+    throw Object.assign(
+      new Error(`Unsupported file type: ${file.originalname}`),
+      { status: 400 }
+    );
+  }
+
+  const buffer = fs.readFileSync(file.path);
+
+  if (ext === '.pdf') {
+    const pages = await extractPdfWithPages(buffer);
+
+    return {
+      text: pages
+        .map((p) => p.text)
+        .filter(Boolean)
+        .join('\n\n')
+        .trim(),
+      pages,
+    };
+  }
+
+  let text = '';
+
+  if (ext === '.docx') {
+    text = await extractDocx(buffer);
+  } else if (ext === '.html' || ext === '.htm') {
+    text = extractHtml(buffer.toString('utf8'));
+  } else {
+    text = buffer.toString('utf8');
+  }
+
+  return {
+    text: text.trim(),
+    pages: null,
+  };
+}
+
+export async function extractText(file) {
+  const ext = detectExt(file.originalname);
+  if (!ext) {
+    throw Object.assign(new Error(`Unsupported file type: ${file.originalname}`), { status: 400 });
+  }
+
+  const buffer = fs.readFileSync(file.path);
+  let text = '';
+
+  if (ext === '.pdf') {
+    text = await extractPdf(buffer);
+  } else if (ext === '.docx') {
+    text = await extractDocx(buffer);
+  } else if (ext === '.html' || ext === '.htm') {
+    text = extractHtml(buffer.toString('utf8'));
+  } else {
+    text = buffer.toString('utf8');
+  }
+
+  return text.trim();
+}
+
+export async function parseFileHeaders(file) {
+  const buffer = fs.readFileSync(file.path);
+  if (detectExt(file.originalname) !== '.pdf') return { title: null, numPages: null };
+  const pdfParse = (await import('pdf-parse')).default;
+  try {
+    const data = await pdfParse(buffer, { max: 2 });
+    return { title: data.info?.Title || null, numPages: data.numpages };
+  } catch {
+    return { title: null, numPages: null };
+  }
+}
+import fs from 'node:fs';
+import path from 'node:path';
+import crypto from 'node:crypto';
+
+import { store } from './store.js';
+import { extractTextWithPages, parseFileHeaders, detectExt } from './extract.js';
+import { generateSkill, renderMarkdown } from './skillgen.js';
+import { slugify, titleCase } from './utils.js';
+
+const skillsDir = path.join(import.meta.dirname, '..', 'skills');
+
+export function getSkills() {
+  return store.read('skills.json', []);
+}
+export function saveSkills(list) {
+  store.write('skills.json', list);
+}
+export function saveChunks(skillId, chunks) {
+  fs.mkdirSync(path.join(store.dataDir, 'chunks'), { recursive: true });
+  store.write(path.join('chunks', `${skillId}.json`), chunks);
+}
+export function loadChunks(skillId) {
+  return store.read(path.join('chunks', `${skillId}.json`), []);
+}
+export function getSkillById(id) {
+  return getSkills().find((s) => s.id === id) || null;
+}
+
+function writeSkillFiles(doc, skill) {
+  const dir = path.join(skillsDir, doc.slug);
+  fs.mkdirSync(path.join(dir, 'chapters'), { recursive: true });
+  const files = renderMarkdown(skill, doc);
+  for (const [rel, content] of Object.entries(files)) {
+    fs.writeFileSync(path.join(dir, rel), content);
+  }
+}
+
+export async function processDocument(fileLike, { name } = {}) {
+  const ext = detectExt(fileLike.originalname);
+  if (!ext) throw Object.assign(new Error(`Unsupported file type: ${fileLike.originalname}`), { status: 400 });
+
+  const headers = await parseFileHeaders(fileLike);
+  const text = await extractText(fileLike);
+  if (!text) throw Object.assign(new Error('No extractable text found (is this a scanned PDF?)'), { status: 400 });
+
+  const skillName = titleCase(name || fileLike.originalname);
+  const slug = slugify(skillName) || `doc-${Date.now()}`;
+  const id = crypto.randomUUID();
+
+  const doc = { id, name: skillName, slug, filename: fileLike.originalname, numPages: headers.numPages, size: fileLike.size };
+
+  const skill = generateSkill({ name: skillName, slug, filename: doc.filename, text });
+  writeSkillFiles(doc, skill);
+  saveChunks(id, skill.chunks);
+
+  const { chunks, ...meta } = skill;
+  const record = {
+    ...doc,
+    status: 'ready',
+    createdAt: new Date().toISOString(),
+    summary: meta.summary,
+    topics: meta.topics,
+    glossary: meta.glossary.slice(0, 20),
+    patternsCount: meta.patterns.length,
+    factsCount: meta.facts.length,
+    chapters: meta.chapters.map(({ id: cid, title, file, sections }) => ({ id: cid, title, file, sections })),
+    stats: meta.stats,
+    skillFiles: Object.keys(renderMarkdown(meta, doc)),
+  };
+
+  const list = getSkills();
+  list.unshift(record);
+  saveSkills(list);
+  return record;
+}
 import { chunkText, slugify } from './utils.js';
 
 const STOP = new Set([
