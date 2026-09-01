@@ -8,57 +8,64 @@ const STOP = new Set([
 ]);
 
 function tokenize(text) {
-  return String(text)
-    .toLowerCase()
-    .replace(/[^a-z0-9\s-]/g, ' ')
-    .split(/\s+/)
-    .filter((w) => w.length > 1 && !STOP.has(w));
+  return String(text).toLowerCase().replace(/[^a-z0-9\s-]/g, ' ').split(/\s+/).filter((w) => w.length > 1 && !STOP.has(w));
 }
 
 function detectHeadings(lines) {
   const headings = [];
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
+    const line = String(lines[i] || '').trim();
     if (!line) continue;
-    let level = null;
-    const chapterish = /^(chapter|part|unit)\s+[\w.\d]+/i;
-    if (chapterish.test(line) || (line.startsWith('#') && chapterish.test(line.replace(/^#+\s*/, '')))) {
-      level = 1;
-    } else if (/^#{1,3}\s+/.test(line)) {
-      level = line.match(/^#+/)[0].length;
-    } else if (/^section\s+[\w.\d]+/i.test(line)) {
-      level = 1;
-    } else if (/^\d{1,2}(\.\d{1,2})*\s+\S/.test(line)) {
-      level = 2;
-    } else if (/^[A-Z0-9][A-Z0-9\s&',.\-()]{5,}$/.test(line) && line.split(/\s+/).length <= 9) {
-      level = 2;
+
+    // Legal sections are content headings, NOT chapters.
+    if (/^(section|sec\.?)\s+\d+/i.test(line)) {
+      headings.push({ index: i, level: 2, text: line });
+      continue;
     }
-    if (level) headings.push({ index: i, level, text: line.replace(/^#+\s*/, '') });
+
+    // Markdown CHAPTER headings are major headings; other markdown headings are sections.
+    if (/^#{1,3}\s+/.test(line)) {
+      const text = line.replace(/^#+\s*/, '').trim();
+      if (text.length >= 12) {
+        headings.push({ index: i, level: /^chapter\s+\d+/i.test(text) ? 1 : 2, text });
+      }
+      continue;
+    }
+
+    // ONLY explicit CHAPTER headings create chapter boundaries.
+    if (/^chapter\s+\d+/i.test(line)) {
+      headings.push({ index: i, level: 1, text: line });
+      continue;
+    }
+
+    // Reject fragments commonly produced by two-column PDF extraction.
+    const badFragment = /^(TO CAUSE|IS LIKELY|INJURY WHICH|A BODILY|NATURE TO CAUSE|COURSE OF|WHICH IS|THE IN|OF THE)$/i;
+    if (badFragment.test(line)) continue;
+
+    // ALL-CAPS lines are section headings, never chapters.
+    const words = line.split(/\s+/);
+    if (line.length >= 18 && line.length <= 100 && words.length >= 2 && words.length <= 12 && /^[A-Z0-9][A-Z0-9\s&',.\-():/]+$/.test(line)) {
+      headings.push({ index: i, level: 2, text: line });
+    }
   }
   return headings;
 }
 
 function splitChapters(lines, headings) {
-  const chapters = [];
-  const starts = headings.filter((h) => h.level === 1);
-  if (!starts.length) {
-    const body = lines.join('\n');
-    const parts = chunkText(body, 4000, 200);
-    parts.forEach((text, i) => {
-      const firstLine = text.split('\n').find((l) => l.trim()).trim().slice(0, 70);
-      chapters.push({ title: firstLine ? `Part ${i + 1} - ${firstLine}` : `Part ${i + 1}`, body: text });
-    });
-    return chapters;
+  // CRITICAL: only explicit CHAPTER headings split the document.
+  // This prevents PDF fragments such as "SECTION 1: Forensic Medicine"
+  // from becoming fake chapters.
+  const starts = headings.filter((h) => h.level === 1 && /^chapter\s+\d+/i.test(h.text.trim()));
+
+  if (starts.length > 0) {
+    return starts.map((h, i) => {
+      const end = i + 1 < starts.length ? starts[i + 1].index : lines.length;
+      return { title: h.text, body: lines.slice(h.index, end).join('\n').trim() };
+    }).filter((c) => c.body);
   }
 
-  for (let i = 0; i < starts.length; i++) {
-    const startIdx = starts[i].index;
-    const endIdx = i + 1 < starts.length ? starts[i + 1].index : lines.length;
-    const title = starts[i].text;
-    const body = lines.slice(startIdx, endIdx).join('\n').trim();
-    if (body) chapters.push({ title, body });
-  }
-  return chapters;
+  // If no real CHAPTER heading exists, keep the document as one chapter.
+  return [{ title: 'Document', body: lines.join('\n').trim() }];
 }
 
 function extractSections(body, chaptersOffset = 0) {
@@ -69,7 +76,7 @@ function extractSections(body, chaptersOffset = 0) {
   for (const line of lines) {
     const t = line.trim();
     if (t.startsWith('```')) { inCode = !inCode; continue; }
-    if (!inCode && (t.startsWith('## ') || t.startsWith('### '))) {
+    if (!inCode && (t.startsWith('## ') || t.startsWith('### ') || /^(section|sec\.?)\s+\d+/i.test(t))) {
       if (current.text.trim()) sections.push(current);
       current = { title: t.replace(/^#+\s*/, ''), text: '' };
       continue;
@@ -86,9 +93,7 @@ function extractDefinedTerms(body) {
   let m;
   while ((m = regex.exec(body))) {
     const term = m[1].trim();
-    if (term.length > 3 && term.length < 60 && !terms.has(term)) {
-      terms.set(term, m[2].trim());
-    }
+    if (term.length > 3 && term.length < 60 && !terms.has(term)) terms.set(term, m[2].trim());
   }
   return terms;
 }
@@ -112,11 +117,9 @@ function extractPatterns(chapters) {
   const hints = /\b(always|never|must|should|avoid|remember|best practice|rule of thumb|to use|step[s]?\b|technique|pattern|recommend|tip)\b/i;
   for (const ch of chapters) {
     for (const sec of ch.sections) {
-      const lines = sec.text.split('\n');
-      for (const raw of lines) {
+      for (const raw of sec.text.split('\n')) {
         const line = raw.trim();
-        if (line.length < 20 || line.length > 240) continue;
-        if (!hints.test(line)) continue;
+        if (line.length < 20 || line.length > 240 || !hints.test(line)) continue;
         if (/^[`*#>|]/.test(line)) continue;
         const clean = line.replace(/^[-•*]+\s*/, '').replace(/```/g, '').trim();
         if (clean) patterns.push({ chapter: ch.title, section: sec.title, text: clean });
@@ -132,11 +135,9 @@ function extractFacts(chapters) {
   const numRegex = /\b\d[\d,.]*\%?|\$\d[\d,.]*|\b\d+(?:\.\d+)?\s?(?:ms|s|min|hours?|days?|GB|MB|KB|TB|Hz|GHz|%|x)\b/i;
   for (const ch of chapters) {
     for (const sec of ch.sections) {
-      const sentences = sec.text.split(/(?<=[.!?])\s+/);
-      for (const s of sentences) {
+      for (const s of sec.text.split(/(?<=[.!?])\s+/)) {
         const clean = s.trim().replace(/^[-•*]+\s*/, '');
-        if (clean.length < 15 || clean.length > 200) continue;
-        if (!numRegex.test(clean)) continue;
+        if (clean.length < 15 || clean.length > 200 || !numRegex.test(clean)) continue;
         facts.push({ chapter: ch.title, section: sec.title, text: clean });
       }
       if (facts.length > 200) return facts;
@@ -162,7 +163,6 @@ export function generateSkill(doc) {
   const lines = doc.text.split('\n');
   const headings = detectHeadings(lines);
   const chapters = splitChapters(lines, headings);
-
   const chaptersOut = [];
   const chaptersForMining = [];
   let chunkId = 0;
@@ -172,38 +172,20 @@ export function generateSkill(doc) {
     const sections = extractSections(ch.body);
     const chapterTitle = slugify(ch.title) || `part-${i + 1}`;
     const chapterId = `ch${String(i + 1).padStart(2, '0')}`;
-    chaptersOut.push({
-      id: chapterId,
-      title: ch.title,
-      file: `chapters/${chapterId}-${chapterTitle}.md`,
-      sections: sections.map((s) => s.title),
-      body: ch.body,
-    });
+    chaptersOut.push({ id: chapterId, title: ch.title, file: `chapters/${chapterId}-${chapterTitle}.md`, sections: sections.map((s) => s.title), body: ch.body });
     chaptersForMining.push({ title: ch.title, sections });
 
     for (const sec of sections) {
       const text = `${sec.title}\n\n${sec.text}`.trim();
       for (const piece of chunkText(text, 600, 120)) {
-        allChunks.push({
-          id: `c${chunkId++}`,
-          chapterId,
-          chapterTitle: ch.title,
-          sectionTitle: sec.title,
-          text: piece,
-        });
+        allChunks.push({ id: `c${chunkId++}`, chapterId, chapterTitle: ch.title, sectionTitle: sec.title, text: piece });
       }
     }
   });
 
   if (!allChunks.length) {
     for (const piece of chunkText(doc.text, 600, 120)) {
-      allChunks.push({
-        id: `c${chunkId++}`,
-        chapterId: 'ch00',
-        chapterTitle: 'Document',
-        sectionTitle: 'Full text',
-        text: piece,
-      });
+      allChunks.push({ id: `c${chunkId++}`, chapterId: 'ch00', chapterTitle: 'Document', sectionTitle: 'Full text', text: piece });
     }
   }
 
@@ -228,43 +210,27 @@ export function generateSkill(doc) {
     keyTerms: keyTerms.slice(0, 25).map(([term, count]) => ({ term, count })),
     topics,
     summary,
-    stats: {
-      wordCount: doc.text.split(/\s+/).length,
-      chapterCount: chaptersOut.length,
-      chunkCount: allChunks.length,
-    },
+    stats: { wordCount: doc.text.split(/\s+/).length, chapterCount: chaptersOut.length, chunkCount: allChunks.length },
   };
 }
 
 export function renderMarkdown(skill, doc) {
   const files = {};
-
   const toc = skill.chapters.map((c) => `- ${c.title} \`\`${c.file}\`\``).join('\n');
   files['SKILL.md'] = `# ${doc.name}\n\n${skill.summary || 'Converted from ' + doc.filename}\n\n## Overview\n\n- **Slug:** \`${doc.slug}\`\n- **Words:** ${skill.stats.wordCount}\n- **Chapters:** ${skill.stats.chapterCount}\n- **Chunks:** ${skill.stats.chunkCount}\n\n## Chapter index (loaded on demand)\n\n${toc}\n\n## How to use\n\nAsk questions about ${doc.name}. The agent retrieves the most relevant chapter\nand answers from the real content with references — no hallucination.\n`;
 
   for (const c of skill.chapters) {
     let md = `# ${c.title}\n\n`;
     const sections = extractSections(c.body);
-    for (const sec of sections) {
-      md += `## ${sec.title}\n\n${sec.text.trim()}\n\n`;
-    }
+    for (const sec of sections) md += `## ${sec.title}\n\n${sec.text.trim()}\n\n`;
     files[c.file] = md;
   }
 
-  const gl = skill.glossary.length
-    ? skill.glossary.map((g) => `- **${g.term}** — ${g.def}`).join('\n')
-    : '_(no formal definitions detected)_';
+  const gl = skill.glossary.length ? skill.glossary.map((g) => `- **${g.term}** — ${g.def}`).join('\n') : '_(no formal definitions detected)_';
   files['glossary.md'] = `# Glossary\n\n${gl}\n`;
-
-  const pat = skill.patterns.length
-    ? skill.patterns.slice(0, 80).map((p) => `- [${p.chapter}] ${p.text}`).join('\n')
-    : '_(no patterns detected)_';
+  const pat = skill.patterns.length ? skill.patterns.slice(0, 80).map((p) => `- [${p.chapter}] ${p.text}`).join('\n') : '_(no patterns detected)_';
   files['patterns.md'] = `# Patterns & Rules of Thumb\n\n${pat}\n`;
-
-  const factsMd = skill.facts.length
-    ? skill.facts.slice(0, 60).map((f) => `- [${f.chapter}] ${f.text}`).join('\n')
-    : '_(no numeric facts detected)_';
+  const factsMd = skill.facts.length ? skill.facts.slice(0, 60).map((f) => `- [${f.chapter}] ${f.text}`).join('\n') : '_(no numeric facts detected)_';
   files['cheatsheet.md'] = `# Cheatsheet — key facts\n\n${factsMd}\n`;
-
   return files;
 }
