@@ -53,19 +53,42 @@ function detectHeadings(lines) {
 
 function splitChapters(lines, headings) {
   // CRITICAL: only explicit CHAPTER headings split the document.
-  // This prevents PDF fragments such as "SECTION 1: Forensic Medicine"
-  // from becoming fake chapters.
-  const starts = headings.filter((h) => h.level === 1 && /^chapter\s+\d+/i.test(h.text.trim()));
+  // Repeated CHAPTER headings are often PDF running headers, so a
+  // consecutive repeat of the same chapter number is ignored.
+  const starts = [];
+  let lastChapterNo = null;
+
+  for (const h of headings) {
+    if (h.level !== 1) continue;
+
+    const match = h.text.trim().match(/^chapter\s+(\d+)/i);
+    if (!match) continue;
+
+    const chapterNo = match[1];
+
+    // Ignore repeated running-header copies of the same chapter.
+    if (chapterNo === lastChapterNo) continue;
+
+    starts.push(h);
+    lastChapterNo = chapterNo;
+  }
 
   if (starts.length > 0) {
     return starts.map((h, i) => {
       const end = i + 1 < starts.length ? starts[i + 1].index : lines.length;
-      return { title: h.text, body: lines.slice(h.index, end).join('\n').trim() };
+
+      return {
+        title: h.text,
+        body: lines.slice(h.index, end).join('\n').trim(),
+      };
     }).filter((c) => c.body);
   }
 
   // If no real CHAPTER heading exists, keep the document as one chapter.
-  return [{ title: 'Document', body: lines.join('\n').trim() }];
+  return [{
+    title: 'Document',
+    body: lines.join('\n').trim()
+  }];
 }
 
 function extractSections(body, chaptersOffset = 0) {

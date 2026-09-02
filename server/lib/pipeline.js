@@ -40,7 +40,8 @@ export async function processDocument(fileLike, { name } = {}) {
   if (!ext) throw Object.assign(new Error(`Unsupported file type: ${fileLike.originalname}`), { status: 400 });
 
   const headers = await parseFileHeaders(fileLike);
-  const text = await extractText(fileLike);
+  const extracted = await extractTextWithPages(fileLike);
+  const text = extracted.text;
   if (!text) throw Object.assign(new Error('No extractable text found (is this a scanned PDF?)'), { status: 400 });
 
   const skillName = titleCase(name || fileLike.originalname);
